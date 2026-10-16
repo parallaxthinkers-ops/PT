@@ -1,0 +1,97 @@
+name: Build Parallax Tracker
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "debug = test app, release = final app, both = build both"
+        type: choice
+        default: both
+        options:
+          - both
+          - debug
+          - release
+      run_tests:
+        description: "Also run unit tests (slower; a failing test stops the build)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Unzip project
+        run: |
+          rm -rf src_project && mkdir src_project
+          unzip -q project.zip -d src_project
+          # if the zip contains a single top folder, step into it
+          if [ ! -f src_project/gradlew ]; then
+            sub=$(find src_project -maxdepth 2 -name gradlew -printf '%h\n' | head -n1)
+            mv "$sub" proj_root && rm -rf src_project && mv proj_root src_project
+          fi
+          chmod +x src_project/gradlew
+
+      - name: Unit tests
+        if: ${{ inputs.run_tests }}
+        working-directory: src_project
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build debug APK
+        if: ${{ inputs.variant == 'debug' || inputs.variant == 'both' }}
+        working-directory: src_project
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Restore release key (only if the secrets exist)
+        id: key
+        if: ${{ inputs.variant == 'release' || inputs.variant == 'both' }}
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No KEYSTORE_B64 secret: the release APK will be UNSIGNED (it cannot be installed until signed)."
+          fi
+
+      - name: Build release APK
+        if: ${{ inputs.variant == 'release' || inputs.variant == 'both' }}
+        working-directory: src_project
+        env:
+          STORE_FILE: ${{ runner.temp }}/release.jks
+          STORE_PASSWORD: ${{ secrets.KEY_PASS }}
+          KEY_ALIAS: parallax
+          KEY_PASSWORD: ${{ secrets.KEY_PASS }}
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Show who signed the release APK
+        if: ${{ steps.key.outputs.signed == 'true' }}
+        run: |
+          keytool -printcert -jarfile src_project/app/build/outputs/apk/release/app-release.apk | head -n 8
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.variant == 'debug' || inputs.variant == 'both' }}
+        with:
+          name: app-debug
+          path: src_project/app/build/outputs/apk/debug/*.apk
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.variant == 'release' || inputs.variant == 'both' }}
+        with:
+          name: app-release
+          path: src_project/app/build/outputs/apk/release/*.apk
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && inputs.run_tests }}
+        with:
+          name: test-reports
+          path: src_project/app/build/reports/tests/
+          if-no-files-found: ignore

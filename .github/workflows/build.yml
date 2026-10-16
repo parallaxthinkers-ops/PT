@@ -1,7 +1,7 @@
 name: Build Parallax Tracker
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: 
     inputs:
       variant:
         description: "debug = test app, release = final app, both = build both"

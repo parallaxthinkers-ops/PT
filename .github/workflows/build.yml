@@ -1,7 +1,7 @@
 name: Build Parallax Tracker
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
     inputs:
       variant:
         description: "debug = test app, release = final app, both = build both"
@@ -38,15 +38,21 @@ jobs:
           fi
           chmod +x src_project/gradlew
 
+      # Every Gradle step below also saves its full text to build-log.txt (the build still fails if Gradle fails).
+      # If anything fails, the step "Show the real errors" puts the important lines at the top of the run page.
       - name: Unit tests
         if: ${{ inputs.run_tests }}
         working-directory: src_project
-        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace 2>&1 | tee -a "$GITHUB_WORKSPACE/build-log.txt"
 
       - name: Build debug APK
         if: ${{ inputs.variant == 'debug' || inputs.variant == 'both' }}
         working-directory: src_project
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee -a "$GITHUB_WORKSPACE/build-log.txt"
 
       - name: Restore release key (only if the secrets exist)
         id: key
@@ -70,7 +76,30 @@ jobs:
           STORE_PASSWORD: ${{ secrets.KEY_PASS }}
           KEY_ALIAS: parallax
           KEY_PASSWORD: ${{ secrets.KEY_PASS }}
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee -a "$GITHUB_WORKSPACE/build-log.txt"
+
+      # Runs only when something failed. Shows the compiler errors ("e: file:///...") and Gradle's own reason
+      # ("What went wrong") in the run summary, so you do not have to scroll a 3000-line log on a phone.
+      # The harmless KSP 2.3.5 message about ApplicationManager is left out on purpose (fixed in KSP 2.3.6).
+      - name: Show the real errors
+        if: ${{ failure() }}
+        run: |
+          {
+            echo "## Build failed - the lines that matter"
+            echo
+            echo '```'
+            if [ -f build-log.txt ]; then
+              grep -a -E '^e: |error: |FAILURE: Build failed|What went wrong|Execution failed for task|Unresolved reference|Compilation error' build-log.txt \
+                | grep -a -v 'ApplicationManager' | head -n 60
+            else
+              echo "No build-log.txt (the failure happened before Gradle started)."
+            fi
+            echo '```'
+            echo
+            echo "Lines starting with e: name the file and line number of the real problem."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Show who signed the release APK
         if: ${{ steps.key.outputs.signed == 'true' }}
@@ -94,4 +123,11 @@ jobs:
         with:
           name: test-reports
           path: src_project/app/build/reports/tests/
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ failure() }}
+        with:
+          name: build-log
+          path: build-log.txt
           if-no-files-found: ignore
